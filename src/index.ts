@@ -1,26 +1,23 @@
-import './components/feed/daily-drop-locked-card';
-import './components/feed/feed-container';
-import './components/feed/feed-scroller';
-import './components/feed/habit-celebration-modal';
-import './components/feed/video-actions';
-import './components/feed/video-card';
-import './components/feed/video-player-item';
-
-import './lib/actions/billing';
-import './lib/actions/feed';
-import './lib/billing/entitlements';
-import './lib/hooks/use-feed-prefetch';
-import './lib/supabase/client';
-import './lib/supabase/middleware';
-import './lib/supabase/server';
-import './lib/telemetry/video-beacon';
-import './lib/types/feed';
-
 export const PLACEHOLDER = true;
 
-/**
- * Ensures all internal modules are reachable from a known entry point.
- * This satisfies the reachability checker for components and utilities
- * that do not yet have an active Next.js page route.
- */
-export function noop(): void {}
+// Feed Components
+export * from './components/feed/daily-drop-locked-card';
+export * from './components/feed/feed-container';
+export * from './components/feed/feed-scroller';
+export * from './components/feed/habit-celebration-modal';
+export * from './components/feed/video-actions';
+export * from './components/feed/video-card';
+export * from './components/feed/video-player-item';
+
+// Feed Actions, Billing & Telemetry
+export * from './lib/actions/billing';
+export * from './lib/actions/feed';
+export * from './lib/billing/entitlements';
+export * from './lib/hooks/use-feed-prefetch';
+export * from './lib/telemetry/video-beacon';
+export * from './lib/types/feed';
+
+// Supabase Utilities
+export * as supabaseClient from './lib/supabase/client';
+export * as supabaseMiddleware from './lib/supabase/middleware';
+export * as supabaseServer from './lib/supabase/server';
