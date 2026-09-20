@@ -20,7 +20,6 @@ interface VideoPlayerItemProps {
   isActive: boolean;
   shouldMountVideo: boolean;
   isGlobalMuted: boolean;
-  onToggleMute: () => void;
   userId: string;
 }
 

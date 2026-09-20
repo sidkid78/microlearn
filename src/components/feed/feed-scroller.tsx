@@ -1,10 +1,11 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import type { DeliveryWithVideo } from '../../lib/types/feed';
+import type { DeliveryWithVideo } from '@/lib/types/feed';
 import { VideoPlayerItem } from './video-player-item';
-import { useFeedPrefetch } from '../../lib/hooks/use-feed-prefetch';
-import { Volume2, VolumeX, Flame } from 'lucide-react';
+import { useFeedPrefetch } from '@/lib/hooks/use-feed-prefetch';
+import { Volume2, VolumeX, Flame, Loader2 } from 'lucide-react';
+import { createClient } from '@/lib/supabase/client';
 
 interface FeedScrollerProps {
   deliveries: DeliveryWithVideo[];
@@ -13,11 +14,21 @@ interface FeedScrollerProps {
 }
 
 export function FeedScroller({ deliveries, streak, userId }: FeedScrollerProps) {
+  const [feedDeliveries, setFeedDeliveries] = useState<DeliveryWithVideo[]>(deliveries);
   const [activeIndex, setActiveIndex] = useState<number>(0);
   const [isGlobalMuted, setIsGlobalMuted] = useState<boolean>(true);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const [isLoadingMore, setIsLoadingMore] = useState<boolean>(false);
+  const [hasMore, setHasMore] = useState<boolean>(true);
 
-  useFeedPrefetch(deliveries, activeIndex);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const isLoadingRef = useRef<boolean>(false);
+
+  useFeedPrefetch(feedDeliveries, activeIndex);
+
+  // Sync state if deliveries prop changes
+  useEffect(() => {
+    setFeedDeliveries(deliveries);
+  }, [deliveries]);
 
   // Restore audio preference from session storage
   useEffect(() => {
@@ -40,13 +51,125 @@ export function FeedScroller({ deliveries, streak, userId }: FeedScrollerProps) 
   }, []);
 
   const scrollToIndex = useCallback((index: number) => {
-    if (index < 0 || index >= deliveries.length || !containerRef.current) return;
+    if (index < 0 || index >= feedDeliveries.length || !containerRef.current) return;
     const targetY = index * containerRef.current.clientHeight;
     containerRef.current.scrollTo({
       top: targetY,
       behavior: 'smooth',
     });
-  }, [deliveries.length]);
+  }, [feedDeliveries.length]);
+
+  // Runtime pagination using the Supabase browser client
+  const loadMoreDeliveries = useCallback(async () => {
+    if (isLoadingRef.current || !hasMore || feedDeliveries.length === 0) return;
+
+    isLoadingRef.current = true;
+    setIsLoadingMore(true);
+
+    try {
+      const lastDelivery = feedDeliveries[feedDeliveries.length - 1];
+      const supabase = createClient();
+
+      const { data: deliveriesData, error } = await supabase
+        .from('user_feed_deliveries')
+        .select(`
+          id,
+          scheduled_for,
+          status,
+          watched_at,
+          watch_duration_seconds,
+          is_completed,
+          video:generated_videos (
+            id,
+            title,
+            script,
+            captions,
+            video_storage_path,
+            thumbnail_storage_path,
+            duration_seconds,
+            topic:topics (
+              title,
+              category,
+              difficulty_level
+            )
+          )
+        `)
+        .eq('user_id', userId)
+        .lt('scheduled_for', lastDelivery.scheduled_for)
+        .order('scheduled_for', { ascending: false })
+        .limit(5);
+
+      if (error) {
+        console.error('Error fetching additional deliveries:', error);
+        return;
+      }
+
+      if (!deliveriesData || deliveriesData.length === 0) {
+        setHasMore(false);
+        return;
+      }
+
+      const existingIds = new Set(feedDeliveries.map((d) => d.id));
+      const validItems = (deliveriesData as any[]).filter(
+        (d) => d && d.video && !existingIds.has(d.id)
+      );
+
+      if (validItems.length === 0) {
+        setHasMore(false);
+        return;
+      }
+
+      const newDeliveries: DeliveryWithVideo[] = validItems.map((d: any) => {
+        const videoPath = d.video?.video_storage_path;
+        const thumbnailPath = d.video?.thumbnail_storage_path;
+
+        const {
+          data: { publicUrl: streamUrl },
+        } = supabase.storage.from('videos').getPublicUrl(videoPath || '');
+        const {
+          data: { publicUrl: thumbnailUrl },
+        } = supabase.storage.from('thumbnails').getPublicUrl(thumbnailPath || '');
+
+        return {
+          id: d.id,
+          scheduled_for: d.scheduled_for,
+          status: d.status,
+          watched_at: d.watched_at,
+          watch_duration_seconds: d.watch_duration_seconds,
+          is_completed: !!d.is_completed,
+          video: {
+            id: d.video.id,
+            title: d.video.title,
+            script: d.video.script,
+            captions: d.video.captions,
+            video_storage_path: d.video.video_storage_path,
+            thumbnail_storage_path: d.video.thumbnail_storage_path,
+            duration_seconds: d.video.duration_seconds,
+            streamUrl,
+            thumbnailUrl,
+            topic: d.video.topic,
+          },
+        };
+      });
+
+      setFeedDeliveries((prev) => [...prev, ...newDeliveries]);
+      if (deliveriesData.length < 5) {
+        setHasMore(false);
+      }
+    } catch (err) {
+      console.error('Unexpected error loading more deliveries:', err);
+    } finally {
+      isLoadingRef.current = false;
+      setIsLoadingMore(false);
+    }
+  }, [hasMore, feedDeliveries, userId]);
+
+  // Trigger pagination when user scrolls near the end of the loaded feed
+  useEffect(() => {
+    if (activeIndex >= feedDeliveries.length - 2 && hasMore && !isLoadingRef.current && feedDeliveries.length > 0) {
+      loadMoreDeliveries();
+    }
+  }, [activeIndex, feedDeliveries.length, hasMore, loadMoreDeliveries]);
 
   // Keyboard navigation handler (Desktop / Tablet with keyboard)
   useEffect(() => {
@@ -77,10 +200,10 @@ export function FeedScroller({ deliveries, streak, userId }: FeedScrollerProps) 
     const currentScroll = container.scrollTop;
     const computedIndex = Math.round(currentScroll / height);
 
-    if (computedIndex !== activeIndex && computedIndex >= 0 && computedIndex < deliveries.length) {
+    if (computedIndex !== activeIndex && computedIndex >= 0 && computedIndex < feedDeliveries.length) {
       setActiveIndex(computedIndex);
     }
-  }, [activeIndex, deliveries.length]);
+  }, [activeIndex, feedDeliveries.length]);
 
   return (
     <div className="relative w-full h-[100dvh] bg-black overflow-hidden select-none">
@@ -113,7 +236,7 @@ export function FeedScroller({ deliveries, streak, userId }: FeedScrollerProps) 
         className="w-full h-full overflow-y-scroll snap-y snap-mandatory no-scrollbar"
         style={{ scrollBehavior: 'smooth', WebkitOverflowScrolling: 'touch' }}
       >
-        {deliveries.map((delivery, index) => {
+        {feedDeliveries.map((delivery, index) => {
           // Fixed 3-node sliding window: only render real video players within distance <= 1
           const shouldMountVideo = Math.abs(index - activeIndex) <= 1;
 
@@ -127,13 +250,22 @@ export function FeedScroller({ deliveries, streak, userId }: FeedScrollerProps) 
                 isActive={index === activeIndex}
                 shouldMountVideo={shouldMountVideo}
                 isGlobalMuted={isGlobalMuted}
-                onToggleMute={toggleGlobalMute}
                 userId={userId}
               />
             </section>
           );
         })}
       </main>
+
+      {/* Subtle Loading Indicator for background pagination */}
+      {isLoadingMore && (
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 rounded-full bg-black/70 px-3.5 py-1.5 backdrop-blur-md border border-white/10 shadow-lg pointer-events-none">
+          <Loader2 className="w-3.5 h-3.5 text-amber-400 animate-spin" />
+          <span className="text-white/80 text-[11px] font-medium tracking-wide">
+            Loading older drops...
+          </span>
+        </div>
+      )}
     </div>
   );
 }

@@ -5,3 +5,10 @@ out/
 .env
 .env.local
 *.log
+
+# Build artifacts (were tracked by mistake)
+*.tsbuildinfo
+
+# Agent working state
+.gemini-agent/
+.task_registry.json

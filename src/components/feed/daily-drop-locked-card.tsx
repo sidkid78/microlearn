@@ -1,7 +1,8 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { Lock, Clock, Sparkles } from 'lucide-react';
+import React, { useState, useEffect, useTransition } from 'react';
+import { Lock, Clock, Sparkles, Loader2 } from 'lucide-react';
+import { createCheckoutSession } from '../../lib/actions/billing';
 
 interface DailyDropLockedProps {
   deliveryHourUtc: number;
@@ -9,6 +10,7 @@ interface DailyDropLockedProps {
 
 export function DailyDropLockedCard({ deliveryHourUtc }: DailyDropLockedProps) {
   const [timeLeft, setTimeLeft] = useState<string>('');
+  const [isPending, startTransition] = useTransition();
 
   useEffect(() => {
     const calculateTime = () => {
@@ -37,6 +39,18 @@ export function DailyDropLockedCard({ deliveryHourUtc }: DailyDropLockedProps) {
     return () => clearInterval(interval);
   }, [deliveryHourUtc]);
 
+  const handleUpgrade = () => {
+    startTransition(async () => {
+      try {
+        // Use environment variable or default placeholder for Pro price ID
+        const proPriceId = process.env.NEXT_PUBLIC_STRIPE_PRO_PRICE_ID || 'price_pro_default';
+        await createCheckoutSession(proPriceId);
+      } catch (err) {
+        console.error('Failed to initiate checkout:', err);
+      }
+    });
+  };
+
   return (
     <div className="w-full h-[100dvh] bg-neutral-950 flex flex-col items-center justify-center p-6 text-center">
       <div className="w-20 h-20 rounded-3xl bg-neutral-900 border border-white/10 flex items-center justify-center text-amber-500 mb-6 shadow-2xl">
@@ -56,8 +70,16 @@ export function DailyDropLockedCard({ deliveryHourUtc }: DailyDropLockedProps) {
         <span>{timeLeft || '--:--:--'}</span>
       </div>
 
-      <button className="px-6 py-3 rounded-xl bg-neutral-800 hover:bg-neutral-700 border border-white/10 text-white text-xs font-semibold flex items-center gap-2 transition-all">
-        <Sparkles className="w-4 h-4 text-amber-400" />
+      <button
+        onClick={handleUpgrade}
+        disabled={isPending}
+        className="px-6 py-3 rounded-xl bg-neutral-800 hover:bg-neutral-700 border border-white/10 text-white text-xs font-semibold flex items-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        {isPending ? (
+          <Loader2 className="w-4 h-4 text-amber-400 animate-spin" />
+        ) : (
+          <Sparkles className="w-4 h-4 text-amber-400" />
+        )}
         <span>Upgrade to Pro for Unlimited Feed Access</span>
       </button>
     </div>
