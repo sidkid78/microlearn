@@ -6,7 +6,7 @@
       "DOM",
       "DOM.Iterable"
     ],
-    "jsx": "preserve",
+    "jsx": "react-jsx",
     "isolatedModules": true,
     "incremental": true,
     "plugins": [
@@ -31,12 +31,15 @@
       "@/*": [
         "src/*"
       ]
-    }
+    },
+    "allowJs": true
   },
   "include": [
     "src/**/*.ts",
     "src/**/*.tsx",
-    "tests/**/*.ts"
+    "tests/**/*.ts",
+    ".next/types/**/*.ts",
+    ".next/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"
