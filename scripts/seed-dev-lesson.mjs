@@ -1,9 +1,8 @@
 /**
- * seed-dev-lesson.mjs — generate one real lesson: narration + slides.
+ * seed-dev-lesson.mjs — generate real lessons: script, narration, slides.
  *
- * Runs the same pipeline the Inngest job runs, without Inngest: TTS for
- * the voice, one image per beat, upload both, and attach the cue points
- * to an existing delivery. Local only.
+ * Runs what the Inngest pipeline runs, without Inngest, for every
+ * delivery whose video has no slides yet. Local only.
  *
  *   node scripts/seed-dev-lesson.mjs
  */
@@ -19,7 +18,12 @@ const URL_ = env.NEXT_PUBLIC_SUPABASE_URL;
 const KEY = env.SUPABASE_SERVICE_ROLE_KEY;
 const AI_KEY = env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
 if (!/127\.0\.0\.1|localhost/.test(URL_)) throw new Error(`refusing non-local: ${URL_}`);
-if (!AI_KEY) throw new Error('set GEMINI_API_KEY in .env.local to generate a lesson');
+if (!AI_KEY) throw new Error('set GEMINI_API_KEY in .env.local');
+
+const SCRIPT_MODEL = 'gemini-3.8-flash';
+const TTS_MODEL = 'gemini-3.1-flash-tts-preview';
+const IMAGE_MODEL = 'gemini-3.1-flash-image';
+const PALETTE = { primary: '#f97316', accent: '#fbbf24', background: '#0f172a' };
 
 const h = { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' };
 const ai = new GoogleGenAI({ apiKey: AI_KEY });
@@ -52,78 +56,116 @@ function pcmToWav(pcm, rate = 24000) {
   return Buffer.concat([head, pcm]);
 }
 
-const [video] = await rest('generated_videos?select=id,title,topic_id&order=created_at.asc&limit=1');
-if (!video) throw new Error('no generated_videos row — run seed-dev-user.mjs first');
-console.log(`lesson    ${video.title}`);
+const json = (text) => {
+  const body = text.replace(/```json|```/g, '').trim();
+  return JSON.parse(body.slice(body.indexOf('{'), body.lastIndexOf('}') + 1));
+};
 
-const BEATS = [
-  { seq: 1, hook: 'Why flashing fails first', text: 'Flashing is the thinnest defence on a roof, and it fails before the shingles do.' },
-  { seq: 2, hook: 'Check the chimney saddle', text: 'Start at the chimney. Look for a saddle behind it, and step flashing woven into every course.' },
-  { seq: 3, hook: 'Valleys collect everything', text: 'Valleys carry the most water. Lift the shingle edge and check the metal underneath for rust or gaps.' },
-  { seq: 4, hook: 'Seal is not a fix', text: 'If you find sealant doing the work of metal, that is a repair waiting to leak again.' },
-];
-const script = BEATS.map((b) => b.text).join(' ');
+async function buildLesson(video) {
+  const title = video.title;
+  console.log(`\n${title}`);
 
-// 1. narration
-const speech = await ai.interactions.create({
-  model: 'gemini-3.1-flash-tts-preview', input: script,
-  response_format: { type: 'audio' }, generation_config: { speech_config: [{ voice: 'Kore' }] },
-});
-const pcm = Buffer.from(speech.output_audio.data, 'base64');
-const wav = pcmToWav(pcm);
-const duration = Number((pcm.length / (24000 * 2)).toFixed(3));
-const audioPath = `narration/dev/${video.id}.wav`;
-await upload('learning-videos', audioPath, wav, 'audio/wav');
-console.log(`narration ${duration}s -> ${audioPath}`);
-
-// 2. word timings
-const aligned = await ai.interactions.create({
-  model: 'gemini-3.8-flash',
-  input: [
-    { type: 'audio', data: wav.toString('base64'), mime_type: 'audio/wav' },
-    { type: 'text', text: `Time each word AS WRITTEN below. Do not re-transcribe or normalise.\n\nSCRIPT:\n${script}\n\nJSON only: {"words":[{"word":"A","start":0.0,"end":0.1}]}. Audio is ${duration}s.` },
-  ],
-});
-const words = JSON.parse((aligned.output_text || '').replace(/```json|```/g, '').trim()).words;
-console.log(`captions  ${words.length} words`);
-
-// 3. one slide per beat
-const palette = { primary: '#f97316', accent: '#fbbf24', background: '#0f172a' };
-const slides = [];
-for (const beat of BEATS) {
-  const interaction = await ai.interactions.create({
-    model: 'gemini-3.1-flash-image',
-    input: `Vertical 9:16 instructional slide for a roofing micro-lesson. Subject: ${beat.hook}. `
-      + `Flat vector illustration, background ${palette.background}, primary ${palette.primary}, accent ${palette.accent}. `
-      + `Generous negative space in the lower third. No captions, no subtitles, no text, no watermark.`,
-    response_format: { type: 'image', aspect_ratio: '9:16' },
+  // 1. beats — the same shape the real script generator emits
+  const scripted = await ai.interactions.create({
+    model: SCRIPT_MODEL,
+    input:
+      `Write a four-beat micro-lesson for a working tradesperson about "${title}". ` +
+      `Each beat is one or two spoken sentences a narrator reads, plus a short ` +
+      `on-screen hook of at most six words describing what the slide shows. ` +
+      `Be concrete and practical — name what to look at and what it means. ` +
+      `JSON only: {"beats":[{"hook":"...","text":"..."}]}`,
   });
-  const img = interaction.output_image;
-  const ext = (img.mime_type || 'image/jpeg').includes('png') ? 'png' : 'jpg';
-  const path = `slides/dev/${video.id}/${beat.seq}.${ext}`;
-  await upload('learning-videos', path, Buffer.from(img.data, 'base64'), img.mime_type);
-  const span = duration / BEATS.length;
-  slides.push({
-    sequence: beat.seq,
-    startSecond: Number(((beat.seq - 1) * span).toFixed(3)),
-    endSecond: Number((beat.seq * span).toFixed(3)),
-    storagePath: path,
-    onScreenHook: beat.hook,
+  const beats = json(scripted.output_text).beats.slice(0, 4);
+  const script = beats.map((b) => b.text).join(' ');
+  console.log(`  script    ${beats.length} beats, ${script.split(/\s+/).length} words`);
+
+  // 2. narration
+  const speech = await ai.interactions.create({
+    model: TTS_MODEL, input: script,
+    response_format: { type: 'audio' }, generation_config: { speech_config: [{ voice: 'Kore' }] },
   });
-  console.log(`slide ${beat.seq}   ${beat.hook}`);
+  const pcm = Buffer.from(speech.output_audio.data, 'base64');
+  const wav = pcmToWav(pcm);
+  const duration = Number((pcm.length / (24000 * 2)).toFixed(3));
+  const audioPath = `narration/dev/${video.id}.wav`;
+  await upload('learning-videos', audioPath, wav, 'audio/wav');
+  console.log(`  narration ${duration}s`);
+
+  // 3. word timings, against the KNOWN script so captions cannot drift
+  let words = [];
+  try {
+    const aligned = await ai.interactions.create({
+      model: SCRIPT_MODEL,
+      input: [
+        { type: 'audio', data: wav.toString('base64'), mime_type: 'audio/wav' },
+        { type: 'text', text:
+          `Time each word AS WRITTEN below. Do not re-transcribe or normalise numbers.\n\n` +
+          `SCRIPT:\n${script}\n\nJSON only: {"words":[{"word":"A","start":0.0,"end":0.1}]}. ` +
+          `Audio is ${duration}s.` },
+      ],
+    });
+    words = json(aligned.output_text).words;
+  } catch {
+    words = [];
+  }
+  console.log(`  captions  ${words.length} words`);
+
+  // 4. one slide per beat
+  const slides = [];
+  const span = duration / beats.length;
+  for (const [i, beat] of beats.entries()) {
+    const seq = i + 1;
+    const interaction = await ai.interactions.create({
+      model: IMAGE_MODEL,
+      input:
+        `Vertical 9:16 instructional slide for a micro-lesson about ${title}. ` +
+        `Subject: ${beat.hook}. Flat vector illustration, background ${PALETTE.background}, ` +
+        `primary ${PALETTE.primary}, accent ${PALETTE.accent}. Generous negative space in the ` +
+        `lower third. No captions, no subtitles, no text, no watermark.`,
+      response_format: { type: 'image', aspect_ratio: '9:16' },
+    });
+    const img = interaction.output_image;
+    if (!img?.data) continue;
+    const ext = (img.mime_type || 'image/jpeg').includes('png') ? 'png' : 'jpg';
+    const path = `slides/dev/${video.id}/${seq}.${ext}`;
+    await upload('learning-videos', path, Buffer.from(img.data, 'base64'), img.mime_type);
+    slides.push({
+      sequence: seq,
+      startSecond: Number((i * span).toFixed(3)),
+      endSecond: Number(((i + 1) * span).toFixed(3)),
+      storagePath: path,
+      onScreenHook: beat.hook,
+    });
+    console.log(`  slide ${seq}   ${beat.hook}`);
+  }
+  if (slides.length === 0) throw new Error('no slides generated');
+
+  await rest(`generated_videos?id=eq.${video.id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      generation_status: 'ready',
+      script,
+      captions: { words },
+      duration_seconds: duration,
+      video_storage_path: audioPath,
+      thumbnail_storage_path: slides[0].storagePath,
+      ai_metadata: { format: 'slides+narration', palette: PALETTE, slides },
+    }),
+  });
 }
 
-// 4. record it
-await rest(`generated_videos?id=eq.${video.id}`, {
-  method: 'PATCH',
-  body: JSON.stringify({
-    generation_status: 'ready',
-    script,
-    captions: { words },
-    duration_seconds: duration,
-    video_storage_path: audioPath,
-    thumbnail_storage_path: slides[0].storagePath,
-    ai_metadata: { format: 'slides+narration', palette, slides },
-  }),
-});
-console.log('\nlesson ready — reload the feed');
+// Every video attached to a delivery that has no slides yet.
+const deliveries = await rest(
+  'user_feed_deliveries?select=video:generated_videos(id,title,ai_metadata)&order=scheduled_for.desc'
+);
+const pending = deliveries
+  .map((d) => d.video)
+  .filter((v) => v && !(v.ai_metadata?.slides?.length));
+
+if (pending.length === 0) {
+  console.log('every delivery already has a lesson');
+} else {
+  console.log(`generating ${pending.length} lesson(s)`);
+  for (const video of pending) await buildLesson(video);
+  console.log('\ndone — reload the feed');
+}
