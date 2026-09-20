@@ -1,4 +1,3 @@
-import { renderMediaOnLambda, getRenderProgress } from "@remotion/lambda";
 import type { WordAlignment } from "../ai/tts-alignment";
 import type { ScriptScene } from "../ai/script-generator";
 
@@ -34,7 +33,13 @@ export async function dispatchRemotionRender(
 ): Promise<{ renderId: string; bucketName: string }> {
   const { functionName, serveUrl, region } = getRemotionConfig();
 
-  const { renderId, bucketName } = await renderMediaOnLambda({
+  // Dynamically import @remotion/lambda to bypass Next.js Webpack/Turbopack bundling.
+  // This prevents build errors caused by native dependencies in @remotion/studio.
+  const remotionLambda = (await import(
+    /* webpackIgnore: true */ "@remotion/lambda"
+  )) as typeof import("@remotion/lambda");
+
+  const { renderId, bucketName } = await remotionLambda.renderMediaOnLambda({
     region,
     functionName,
     serveUrl,
@@ -57,7 +62,11 @@ export async function pollRenderStatus(
 ): Promise<{ done: boolean; outputUrl?: string; error?: string }> {
   const { functionName, region } = getRemotionConfig();
 
-  const progress = await getRenderProgress({
+  const remotionLambda = (await import(
+    /* webpackIgnore: true */ "@remotion/lambda"
+  )) as typeof import("@remotion/lambda");
+
+  const progress = await remotionLambda.getRenderProgress({
     renderId,
     bucketName,
     functionName,
