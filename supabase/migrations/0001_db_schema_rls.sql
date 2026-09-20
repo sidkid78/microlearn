@@ -368,7 +368,13 @@ CREATE POLICY "Admin can update streaks"
 -- Insert storage buckets (requires storage schema to be available)
 INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 VALUES 
-    ('learning-videos', 'learning-videos', false, 52428800, ARRAY['video/mp4', 'application/x-mpegURL', 'video/MP2T']),
+    -- A lesson is narration plus slides, not a rendered MP4, so this
+    -- bucket holds .wav audio and .jpg/.png slides. The MP4 and HLS
+    -- types stay for any lesson produced before the change.
+    ('learning-videos', 'learning-videos', false, 52428800,
+     ARRAY['video/mp4', 'application/x-mpegURL', 'video/MP2T',
+           'audio/wav', 'audio/x-wav', 'audio/mpeg',
+           'image/jpeg', 'image/png', 'image/webp']),
     ('learning-thumbnails', 'learning-thumbnails', false, 5242880, ARRAY['image/webp', 'image/jpeg', 'image/png'])
 ON CONFLICT (id) DO NOTHING;
 

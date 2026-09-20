@@ -11,7 +11,9 @@
     "test": "vitest run --passWithNoTests",
     "typegen": "next typegen",
     "check:routes": "tsc -p tsconfig.json --noEmit",
-    "gate": "npm run typecheck && npm run test"
+    "gate": "npm run typecheck && npm run test",
+    "seed:dev": "node scripts/seed-dev-user.mjs",
+    "seed:lesson": "node scripts/seed-dev-lesson.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.58.0",
@@ -21,7 +23,6 @@
     "react-dom": "^19.3.0",
     "zod": "^3.25.76",
     "@google/genai": "latest",
-    "@remotion/lambda": "latest",
     "@supabase/ssr": "latest",
     "canvas-confetti": "latest",
     "hls.js": "latest",

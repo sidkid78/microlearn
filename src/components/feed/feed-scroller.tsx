@@ -84,6 +84,7 @@ export function FeedScroller({ deliveries, streak, userId }: FeedScrollerProps) 
             title,
             script,
             captions,
+            ai_metadata,
             video_storage_path,
             thumbnail_storage_path,
             duration_seconds,
@@ -147,6 +148,19 @@ export function FeedScroller({ deliveries, streak, userId }: FeedScrollerProps) 
             duration_seconds: d.video.duration_seconds,
             streamUrl,
             thumbnailUrl,
+            // Same shape the server component builds. Paginated pages
+            // must carry slides too, or scrolling past the first batch
+            // silently drops the visuals.
+            slides: (((d.video as { ai_metadata?: { slides?: Array<{
+              sequence: number; startSecond: number; endSecond: number;
+              storagePath: string; onScreenHook: string;
+            }> } }).ai_metadata?.slides) ?? []).map((slide) => ({
+              sequence: slide.sequence,
+              startSecond: slide.startSecond,
+              endSecond: slide.endSecond,
+              url: supabase.storage.from('videos').getPublicUrl(slide.storagePath).data.publicUrl,
+              onScreenHook: slide.onScreenHook,
+            })),
             topic: d.video.topic,
           },
         };
@@ -216,13 +230,27 @@ export function FeedScroller({ deliveries, streak, userId }: FeedScrollerProps) 
           </span>
         </div>
 
+        {/* Muted is the browser's rule, not a preference: autoplay only
+            works silent until the user interacts. That was survivable
+            when a lesson was video — you could still watch it. A lesson
+            is now narration over slides, so muted means NO content at
+            all, just pictures with no explanation.
+            So while muted the control says what it is instead of being a
+            bare icon in a corner, and it goes quiet once sound is on. */}
         <button
           onClick={toggleGlobalMute}
-          className="pointer-events-auto flex h-10 w-10 items-center justify-center rounded-full bg-black/60 backdrop-blur-md border border-white/10 text-white shadow-lg active:scale-95 transition-transform"
-          aria-label={isGlobalMuted ? 'Unmute feed' : 'Mute feed'}
+          className={
+            isGlobalMuted
+              ? 'pointer-events-auto flex h-10 items-center gap-2 rounded-full bg-amber-500 px-4 text-sm font-bold text-black shadow-lg active:scale-95 transition-transform animate-pulse'
+              : 'pointer-events-auto flex h-10 w-10 items-center justify-center rounded-full bg-black/60 backdrop-blur-md border border-white/10 text-white shadow-lg active:scale-95 transition-transform'
+          }
+          aria-label={isGlobalMuted ? 'Turn on sound' : 'Mute feed'}
         >
           {isGlobalMuted ? (
-            <VolumeX className="w-5 h-5 text-neutral-300" />
+            <>
+              <VolumeX className="w-5 h-5" />
+              <span>Tap for sound</span>
+            </>
           ) : (
             <Volume2 className="w-5 h-5 text-emerald-400" />
           )}

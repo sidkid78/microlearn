@@ -48,6 +48,20 @@ export function VideoPlayerItem({
   const lastTapRef = useRef<number>(0);
   const singleTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // The slide showing right now. A lesson is an audio track plus cue
+  // points, so this is what used to be a frame of rendered video: the
+  // switching happens here instead of in a render farm.
+  const slides = delivery.video.slides ?? [];
+  const activeSlide = useMemo(() => {
+    if (slides.length === 0) return null;
+    return (
+      slides.find((s) => currentTime >= s.startSecond && currentTime < s.endSecond) ??
+      // Before the first cue, or after the last one when the audio runs
+      // slightly long, hold the nearest slide rather than showing black.
+      (currentTime < slides[0].startSecond ? slides[0] : slides[slides.length - 1])
+    );
+  }, [slides, currentTime]);
+
   const captions: WordCaption[] = useMemo(() => {
     if (!delivery.video.captions) return [];
     const raw = delivery.video.captions as { words?: WordCaption[] };
@@ -99,7 +113,13 @@ export function VideoPlayerItem({
 
     const streamUrl = delivery.video.streamUrl;
 
-    if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+    // Lessons are narration over slides now, so the source is usually a
+    // .wav rather than an HLS manifest. hls.js cannot parse one, and
+    // handing it a plain media file makes it fail where the browser
+    // would simply have played it.
+    if (!/\.m3u8(\?|$)/i.test(streamUrl)) {
+      videoEl.src = streamUrl;
+    } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
       // Native Safari HLS
       videoEl.src = streamUrl;
     } else if (Hls.isSupported()) {
@@ -257,6 +277,30 @@ export function VideoPlayerItem({
       className="relative w-full h-full max-w-md mx-auto overflow-hidden bg-black select-none"
       onClick={handleScreenTouch}
     >
+      {/* The lesson itself: slides cross-fading over the narration.
+          The <video> element below still owns playback, progress and
+          telemetry — it just has no picture, because the picture is
+          these. Every slide is mounted and opacity-switched so the next
+          one is already decoded when its cue arrives; swapping a single
+          src flashes on slower connections. */}
+      {slides.length > 0 && (
+        <div className="absolute inset-0 bg-black">
+          {slides.map((slide) => (
+            <Image
+              key={slide.sequence}
+              src={slide.url}
+              alt={slide.onScreenHook}
+              fill
+              sizes="100vw"
+              priority={slide.sequence === slides[0].sequence}
+              className={`object-cover transition-opacity duration-500 ${
+                activeSlide?.sequence === slide.sequence ? 'opacity-100' : 'opacity-0'
+              }`}
+            />
+          ))}
+        </div>
+      )}
+
       {/* Video Node vs Light Poster Placeholder (DOM Recycling) */}
       {shouldMountVideo ? (
         <video
@@ -268,7 +312,11 @@ export function VideoPlayerItem({
           onTimeUpdate={handleTimeUpdate}
           onLoadedMetadata={handleLoadedMetadata}
           poster={delivery.video.thumbnailUrl}
-          className="w-full h-full object-cover pointer-events-none"
+          className={
+            slides.length > 0
+              ? 'absolute inset-0 w-full h-full opacity-0 pointer-events-none'
+              : 'w-full h-full object-cover pointer-events-none'
+          }
         />
       ) : (
         <div className="relative w-full h-full">

@@ -2,7 +2,7 @@ import { serve } from "inngest/next";
 import { inngest, type VideoGenerationEventData } from "../../../lib/inngest/client";
 import { generateInstructionalScript } from "../../../lib/ai/script-generator";
 import { synthesizeSpeechWithAlignment } from "../../../lib/ai/tts-alignment";
-import { dispatchRemotionRender, pollRenderStatus } from "../../../lib/remotion/renderer";
+import { buildSlideManifest, generateSlides } from "../../../lib/ai/slide-generator";
 import { getSupabaseAdmin } from "../../../lib/supabase/service";
 
 const processVideoGenerationPipeline = inngest.createFunction(
@@ -36,124 +36,103 @@ const processVideoGenerationPipeline = inngest.createFunction(
       });
     });
 
-    const ttsResult = await step.run("synthesize-audio-elevenlabs", async () => {
+    const ttsResult = await step.run("synthesize-audio-gemini-tts", async () => {
       const tts = await synthesizeSpeechWithAlignment(scriptResult.full_voiceover_script);
 
-      const audioFileName = `temp_audio/${videoId}.mp3`;
+      // A permanent path, not temp_audio/. The narration is no longer an
+      // intermediate that gets muxed into an MP4 and thrown away — it is
+      // the asset the player loads. Gemini TTS returns WAV, not MP3.
+      const audioStoragePath = `narration/${professionSlug}/${videoId}.wav`;
       const { error: uploadError } = await supabaseAdmin.storage
         .from("learning-videos")
-        .upload(audioFileName, tts.audioBuffer, {
-          contentType: "audio/mpeg",
+        .upload(audioStoragePath, tts.audioBuffer, {
+          contentType: "audio/wav",
           upsert: true,
         });
 
       if (uploadError) throw uploadError;
 
-      const { data: signedAudio } = await supabaseAdmin.storage
-        .from("learning-videos")
-        .createSignedUrl(audioFileName, 3600);
-
-      if (!signedAudio) throw new Error("Failed to create signed URL for audio asset");
-
       return {
-        signedAudioUrl: signedAudio.signedUrl,
+        audioStoragePath,
         durationSeconds: tts.durationSeconds,
         words: tts.words,
       };
     });
 
-    const renderInit = await step.run("dispatch-remotion-render", async () => {
+    const slides = await step.run("generate-slides", async () => {
       await supabaseAdmin
         .from("generated_videos")
         .update({
           generation_status: "rendering",
           script: scriptResult.full_voiceover_script,
           captions: JSON.parse(JSON.stringify(ttsResult.words)),
-          duration_seconds: Math.min(ttsResult.durationSeconds, 60.0),
-          ai_metadata: JSON.parse(JSON.stringify({
-            palette: scriptResult.color_palette,
-            scenes: scriptResult.scenes,
-            model: "gemini-3.7-flash",
-          })),
+          duration_seconds: ttsResult.durationSeconds,
         })
         .eq("id", videoId);
 
-      return await dispatchRemotionRender({
-        videoId,
-        audioUrl: ttsResult.signedAudioUrl,
-        scenes: scriptResult.scenes,
-        words: ttsResult.words,
-        colorPalette: scriptResult.color_palette,
-      });
-    });
+      // One image per script beat, instead of generating footage.
+      // Omni bills about $0.10 per second of 720p video, so a 60 second
+      // lesson costs roughly $6.00 to render; eight slides cost about
+      // $0.32. A talking diagram does not need generated video.
+      const images = await generateSlides(
+        scriptResult.scenes,
+        scriptResult.color_palette,
+        scriptResult.title
+      );
 
-    const renderCompletion = await step.run("poll-render-completion", async () => {
-      let isComplete = false;
-      let attempts = 0;
-      let finalOutputUrl = "";
-
-      while (!isComplete && attempts < 30) {
-        attempts++;
-        const poll = await pollRenderStatus(renderInit.renderId, renderInit.bucketName);
-
-        if (poll.error) {
-          throw new Error(`Remotion Lambda render failed: ${poll.error}`);
-        }
-
-        if (poll.done && poll.outputUrl) {
-          isComplete = true;
-          finalOutputUrl = poll.outputUrl;
-          break;
-        }
-
-        await new Promise((res) => setTimeout(res, 10000));
+      if (images.length === 0) {
+        throw new Error("No slides were generated for this lesson");
       }
 
-      if (!finalOutputUrl) {
-        throw new Error("Render polling timed out after 300 seconds.");
+      const paths = new Map<number, string>();
+      for (const image of images) {
+        const ext = image.mimeType.includes("png") ? "png" : "jpg";
+        const path = `slides/${professionSlug}/${videoId}/${image.sequence}.${ext}`;
+        const { error } = await supabaseAdmin.storage
+          .from("learning-videos")
+          .upload(path, image.bytes, { contentType: image.mimeType, upsert: true });
+        if (error) throw error;
+        paths.set(image.sequence, path);
       }
 
-      return { outputUrl: finalOutputUrl };
+      // Cue points are scaled to the MEASURED narration length. The
+      // script's own scene boundaries are a target; TTS pace is what
+      // actually happened, and the slides have to follow the voice.
+      return buildSlideManifest(scriptResult.scenes, paths, ttsResult.durationSeconds);
     });
 
     const finalAssetPaths = await step.run("ingest-assets-to-supabase", async () => {
-      const videoResponse = await fetch(renderCompletion.outputUrl);
-      const videoArrayBuffer = await videoResponse.arrayBuffer();
-
-      const videoStoragePath = `masters/${professionSlug}/${videoId}.mp4`;
-      const thumbnailStoragePath = `posters/${professionSlug}/${videoId}.webp`;
-
-      const { error: videoUploadErr } = await supabaseAdmin.storage
-        .from("learning-videos")
-        .upload(videoStoragePath, videoArrayBuffer, {
-          contentType: "video/mp4",
-          upsert: true,
-        });
-
-      if (videoUploadErr) throw videoUploadErr;
-
-      const dummyPosterArrayBuffer = new TextEncoder().encode("RIFF....WEBPVP8").buffer;
-      const { error: thumbUploadErr } = await supabaseAdmin.storage
-        .from("learning-thumbnails")
-        .upload(thumbnailStoragePath, dummyPosterArrayBuffer, {
-          contentType: "image/webp",
-          upsert: true,
-        });
-
-      if (thumbUploadErr) throw thumbUploadErr;
+      // Nothing is rendered, so there is nothing to fetch and re-upload.
+      // The narration and the slides are already in storage; this step
+      // records what they are.
+      //
+      // `video_storage_path` holds the AUDIO path. The column name
+      // predates slides and is kept rather than migrated: it means "the
+      // asset the player loads", which is now a .wav. The slide manifest
+      // travels in ai_metadata, and the first slide is the poster.
+      const thumbnailStoragePath = slides[0]?.storagePath ?? "";
 
       const { error: dbUpdateErr } = await supabaseAdmin
         .from("generated_videos")
         .update({
           generation_status: "ready",
-          video_storage_path: videoStoragePath,
+          video_storage_path: ttsResult.audioStoragePath,
           thumbnail_storage_path: thumbnailStoragePath,
+          ai_metadata: JSON.parse(JSON.stringify({
+            format: "slides+narration",
+            palette: scriptResult.color_palette,
+            scenes: scriptResult.scenes,
+            slides,
+            script_model: "gemini-3.8-flash",
+            tts_model: "gemini-3.1-flash-tts-preview",
+            image_model: "gemini-3.1-flash-image",
+          })),
         })
         .eq("id", videoId);
 
       if (dbUpdateErr) throw dbUpdateErr;
 
-      return { videoStoragePath, thumbnailStoragePath };
+      return { videoStoragePath: ttsResult.audioStoragePath, thumbnailStoragePath };
     });
 
     await step.run("distribute-feed-deliveries", async () => {
