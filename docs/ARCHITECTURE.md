@@ -9,7 +9,7 @@ typed in `src/lib/database.types.ts`.
 | --- | --- |
 | `niche_professions` | the audiences content is produced for; the pipeline iterates the active ones |
 | `topics` | per-profession subjects, with category and difficulty |
-| `generated_videos` | one row per produced video: script, storage paths, `generation_status`, captions, AI metadata |
+| `generated_videos` | one row per produced lesson: script, storage paths, `generation_status`, captions, AI metadata |
 | `user_feed_deliveries` | the join that puts a video in a user's feed on a given day, with watch state |
 | `user_streaks` | current and longest streak per user |
 | `subscription_tiers` | what a plan unlocks |
@@ -22,11 +22,31 @@ key that postgrest's `GenericTable` requires, which silently collapses
 every row to `never` — and the compiler reports that only at the call
 sites, never at the definition.
 
-Row-level security is on. Client-side reads go through the anon key and
-are constrained by policy; anything that must bypass RLS uses the service
-role client in `src/lib/supabase/admin.ts` and belongs on the server only.
+A lesson is **narration plus slides**, not a rendered MP4. Two columns on
+`generated_videos` carry names that predate that change and were kept
+rather than migrated:
 
-## The three Supabase clients
+- `video_storage_path` holds the **`.wav` narration** — it means "the
+  asset the player loads".
+- `ai_metadata` carries the slide manifest (`{sequence, startSecond,
+  endSecond, storagePath, onScreenHook}[]`) alongside the palette,
+  scenes, and the model ids used. The player reads it as one blob, so a
+  column per field would be a migration for nothing.
+
+Row-level security is on. Client-side reads go through the anon key and
+are constrained by policy; anything that must bypass RLS uses a service
+role client and belongs on the server only.
+
+Both storage buckets — `learning-videos` and `learning-thumbnails` — are
+**private**. Reads go through `createSignedUrl`, not `getPublicUrl`:
+`getPublicUrl` is a string builder that never contacts the server, so
+against a private bucket it returns a URL that 404s without throwing.
+The assets simply do not appear and nothing reports why.
+`learning-videos` holds the narration *and* the slides, so its MIME
+allowlist covers `audio/wav` and `image/*` as well as the legacy video
+types.
+
+## The Supabase clients
 
 Picking the wrong one is the most common mistake in this codebase.
 
@@ -34,7 +54,15 @@ Picking the wrong one is the most common mistake in this codebase.
 | --- | --- | --- | --- |
 | `src/lib/supabase/server.ts` | server components, route handlers | anon + user session | rendering a page as the signed-in user |
 | `src/lib/supabase/client.ts` | client components | anon | runtime queries in the browser, e.g. feed pagination |
-| `src/lib/supabase/admin.ts` | server only | **service role** | webhook reconciliation, pipeline writes |
+| `src/lib/supabase/admin.ts` | server only | **service role** | webhook reconciliation, cron dispatch, the dev bypass |
+| `src/lib/supabase/service.ts` | server only | **service role** | the Inngest pipeline, and nothing else |
+
+`service.ts` and `admin.ts` are the same client written twice — both
+export a memoised `getSupabaseAdmin()` over `SUPABASE_SERVICE_ROLE_KEY`.
+Two tickets built one independently of the other; only
+`src/app/api/inngest/route.ts` imports `service.ts`. They are listed
+separately here because the duplication is real and you will meet it, not
+because the distinction means anything. Collapsing them is safe.
 
 `src/lib/supabase/middleware.ts` refreshes the auth session on each
 request. It is called from `src/middleware.ts`, the Next convention file
@@ -52,12 +80,20 @@ and nothing should.
 3. locked renders `DailyDropLockedCard` with the next drop hour
 4. unlocked loads today's deliveries and streak, renders `FeedContainer`
 
+In development, step 1 falls through to `DEV_BYPASS_USER_ID` when there
+is no session — see [DEVELOPMENT.md](DEVELOPMENT.md#running-without-auth).
+
+Storage paths are turned into signed URLs here, on the server, before
+anything reaches the browser: the narration, the thumbnail, and every
+slide in the manifest.
+
 `FeedContainer` renders `FeedScroller`, which renders one
 `VideoPlayerItem` per delivery, calls `useFeedPrefetch` to warm upcoming
-videos, and pages in more deliveries with the **browser** client as the
-user scrolls. `VideoPlayerItem` streams via `hls.js` and reports progress
-through `src/lib/telemetry/video-beacon.ts`. Completing a watch extends
-the streak and can raise `HabitCelebrationModal`.
+lessons, and pages in more deliveries with the **browser** client as the
+user scrolls. `VideoPlayerItem` plays the narration over the slides (see
+[Playback](#playback)) and reports progress through
+`src/lib/telemetry/video-beacon.ts`. Completing a watch extends the
+streak and can raise `HabitCelebrationModal`.
 
 ### `POST /api/inngest`
 
@@ -91,15 +127,57 @@ each so a failure resumes rather than restarts:
 | Step | Does |
 | --- | --- |
 | `set-status-scripting` | marks the row in progress |
-| `generate-script-gemini` | `src/lib/ai/script-generator.ts`, Gemini 3.7 Flash |
-| `synthesize-audio-elevenlabs` | narration, plus word timings in `src/lib/ai/tts-alignment.ts` |
-| `dispatch-remotion-render` | `src/lib/remotion/renderer.ts`, Remotion Lambda |
-| `poll-render-completion` | waits for the render |
-| `ingest-assets-to-supabase` | video and thumbnail into Storage |
+| `generate-script-gemini` | `src/lib/ai/script-generator.ts`, `gemini-3.7-flash` |
+| `synthesize-audio-gemini-tts` | `src/lib/ai/tts-alignment.ts`; uploads the `.wav` to `narration/<slug>/<id>.wav` |
+| `generate-slides` | `src/lib/ai/slide-generator.ts`, one image per scene, to `slides/<slug>/<id>/<n>.png` |
+| `ingest-assets-to-supabase` | records the paths and the slide manifest; nothing is fetched or re-uploaded |
 | `distribute-feed-deliveries` | a `user_feed_deliveries` row per eligible subscriber |
 
 **`handle-pipeline-failure`** — marks the video row failed with the error,
 so a stuck generation is visible instead of silently absent.
+
+### Why slides and not generated video
+
+`gemini-omni-1.1-flash` will generate real footage, and it bills about
+**$0.10 per second of 720p video** — roughly **$6.00** for a single
+60-second lesson, against about **$0.32** for eight slides plus
+narration. At four professions a day that is the difference between
+~$720 and ~$39 a month. A talking diagram does not need generated video,
+so the pipeline draws one image per script beat and cross-fades them over
+the voice.
+
+### Narration is the clock
+
+`synthesizeSpeechWithAlignment` returns the audio, its **measured**
+duration, and word timings. `buildSlideManifest` scales every cue point
+to that measured duration rather than to the script's own scene
+boundaries: the script proposes a pace, TTS is what actually happened,
+and the slides have to follow the voice.
+
+Two details of `gemini-3.1-flash-tts-preview` are load-bearing. It
+returns **raw PCM** (`audio/l16; rate=24000`), which `pcmToWav()` wraps
+in a RIFF header — the browser will not play the bare payload. And the
+alignment call is handed the **original script text**, not just the
+audio; without it the aligner transcribes what it hears and drifts
+("sixty" where the script said "60-second"), so the word timings stop
+matching the captions.
+
+If alignment fails, `proportionalAlignment()` distributes timings by word
+length. Degraded cues beat no lesson.
+
+## Playback
+
+`VideoPlayerItem` mounts a `<video>` for the narration and every slide as
+an absolutely-positioned `next/image`, opacity-switched on `currentTime`
+against the manifest's cue points. All slides stay mounted — swapping
+`src` would re-fetch and flash. If `currentTime` falls outside every cue
+(the audio ran slightly long), it holds the nearest slide rather than
+showing black.
+
+`hls.js` is still wired up but is now the **fallback** path: the player
+only reaches for it when the source URL ends in `.m3u8`. Handing hls.js a
+plain `.wav` makes it fail where the browser would simply have played the
+file, so a non-manifest URL is assigned straight to `videoEl.src`.
 
 Inngest here is **v4**: `createFunction` takes two arguments and the
 trigger goes inside the config object as `triggers`. The three-argument v3

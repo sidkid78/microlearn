@@ -54,6 +54,78 @@ PowerShell 5.1, where `&&` is a parser error. A chained script passes in
 CI and fails on a developer laptop for reasons that have nothing to do
 with the code. Split into separate scripts and run them as separate steps.
 
+## Install with `npm ci`, not `npm install`
+
+`npm install` will happily resolve a dependency the lockfile does not
+mention and carry on, leaving the drift uncommitted. That is exactly how
+this repo shipped a tree that typechecked, tested and built while
+`npm ci` failed on a missing `jose` entry — a clean clone could not be
+installed at all.
+
+Use `npm ci`. Reach for `npm install` only when you mean to change a
+dependency, and commit `package-lock.json` in the same change.
+
+## Running without auth
+
+There is no sign-in UI yet, so in development every request would 401 and
+neither the feed nor the pipeline could be exercised. Two seed scripts and
+one variable open a path through it:
+
+```bash
+npm run seed:dev                  # creates the local user, prints its id
+# put that id in .env.local as DEV_BYPASS_USER_ID
+npm run seed:lesson               # generates a real lesson for that user
+```
+
+`src/app/page.tsx` falls back to `DEV_BYPASS_USER_ID` when there is no
+session, and **switches to the service-role client** when it does.
+Skipping the auth check alone is not enough: every query below it still
+runs through RLS, which correctly denies an unauthenticated request. The
+bypass changes who you are; it never changes the rules.
+
+Both guards must hold for it to engage — `NODE_ENV` is `production` in
+any real deployment, and `DEV_BYPASS_USER_ID` lives in `.env.local`,
+which is gitignored.
+
+`seed:lesson` runs what the Inngest pipeline runs, without Inngest, for
+every delivery whose video has no slides yet — so the topics come from
+whatever `seed:dev` scheduled. It is the fastest way to exercise a real
+Gemini run end to end without waiting for the cron. It reads `.env.local`
+directly and refuses to run against a `NEXT_PUBLIC_SUPABASE_URL` that is
+not loopback.
+
+It is a standalone reimplementation, not a call into `src/lib/ai/`, so
+the two can drift: it currently scripts with `gemini-3.8-flash` where the
+pipeline uses `gemini-3.7-flash`. Treat a green `seed:lesson` as evidence
+the *approach* works, not as a test of the shipped pipeline.
+
+## Testing on a phone
+
+Binding the dev server to `0.0.0.0` makes Next treat even *local*
+requests as cross-origin, so HMR dies quietly on the development machine
+as well as on the phone. `next.config.mjs` names the permitted hosts in
+`allowedDevOrigins`, including `127.0.0.1` and `localhost` for that
+reason and `*.trycloudflare.com` because a quick tunnel gets a new name
+every restart.
+
+Slides are a separate problem. `next/image` refuses any host not in
+`images.remotePatterns` — a runtime error on the page that `tsc`,
+`vitest` and `next build` all pass straight over — and Next 16 then
+refuses to optimise an image whose host resolves to a private IP, as an
+SSRF guard. The local Supabase stack is exactly that, which is what
+`dangerouslyAllowLocalIP` is for. It is gated on `NODE_ENV`.
+
+A tunnel is simpler than LAN addressing and gives you HTTPS, which
+anything touching `navigator.mediaDevices` or `navigator.xr` requires:
+
+```bash
+npx cloudflared tunnel --protocol http2 --url http://localhost:3000
+```
+
+`--protocol http2` is not optional on a network that blocks outbound UDP
+7844 — cloudflared's default QUIC transport fails there, and the error it
+prints does not obviously say so.
+
 ## After a migration
 
 ```bash
