@@ -3,7 +3,7 @@ import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { FeedContainer } from '@/components/feed/feed-container';
 import { DailyDropLockedCard } from '@/components/feed/daily-drop-locked-card';
 import { checkUserEntitlements } from '@/lib/billing/entitlements';
-import type { DeliveryWithVideo } from '@/lib/types/feed';
+import { DELIVERY_SELECT, signDeliveries } from '@/lib/feed/deliveries';
 
 export default async function Home() {
   const sessionClient = await createClient();
@@ -70,29 +70,7 @@ export default async function Home() {
   // Fetch deliveries with videos and topics
   const { data: deliveriesData } = await supabase
     .from('user_feed_deliveries')
-    .select(`
-      id,
-      scheduled_for,
-      status,
-      watched_at,
-      watch_duration_seconds,
-      is_completed,
-      video:generated_videos (
-        id,
-        title,
-        script,
-        captions,
-        ai_metadata,
-        video_storage_path,
-        thumbnail_storage_path,
-        duration_seconds,
-        topic:topics (
-          title,
-          category,
-          difficulty_level
-        )
-      )
-    `)
+    .select(DELIVERY_SELECT)
     .eq('user_id', userId)
     .order('scheduled_for', { ascending: false });
 
@@ -100,76 +78,7 @@ export default async function Home() {
     return <DailyDropLockedCard deliveryHourUtc={deliveryHourUtc} />;
   }
 
-  // Transform data to match DeliveryWithVideo interface
-  // Both storage buckets are PRIVATE, so getPublicUrl returns a URL that
-  // 404s without throwing — the assets simply never appear and nothing
-  // reports why. Signed URLs are the correct read path here.
-  //
-  // The bucket names are `learning-videos` and `learning-thumbnails`;
-  // the earlier code asked for `videos` and `thumbnails`, which do not
-  // exist, and getPublicUrl happily built URLs for them anyway.
-  const VIDEOS = 'learning-videos';
-  const THUMBS = 'learning-thumbnails';
-  const TTL = 60 * 60; // one hour, comfortably longer than a session
-
-  async function signed(bucket: string, path: string | null | undefined): Promise<string> {
-    if (!path) return '';
-    const { data } = await supabase.storage.from(bucket).createSignedUrl(path, TTL);
-    return data?.signedUrl ?? '';
-  }
-
-  const initialDeliveries: DeliveryWithVideo[] = await Promise.all(
-    deliveriesData.map(async (d: any) => {
-      const [streamUrl, thumbnailUrl] = await Promise.all([
-        signed(VIDEOS, d.video?.video_storage_path),
-        signed(THUMBS, d.video?.thumbnail_storage_path),
-      ]);
-
-      // Slide cue points ride in ai_metadata: the schema predates slides,
-      // and adding a column would mean a migration for something the
-      // player reads as one blob anyway.
-      const meta = (d.video?.ai_metadata ?? {}) as {
-        slides?: Array<{
-          sequence: number;
-          startSecond: number;
-          endSecond: number;
-          storagePath: string;
-          onScreenHook: string;
-        }>;
-      };
-      const slides = await Promise.all(
-        (meta.slides ?? []).map(async (slide) => ({
-          sequence: slide.sequence,
-          startSecond: slide.startSecond,
-          endSecond: slide.endSecond,
-          url: await signed(VIDEOS, slide.storagePath),
-          onScreenHook: slide.onScreenHook,
-        }))
-      );
-
-      return {
-        id: d.id,
-        scheduled_for: d.scheduled_for,
-        status: d.status,
-        watched_at: d.watched_at,
-        watch_duration_seconds: d.watch_duration_seconds,
-        is_completed: !!d.is_completed,
-        video: {
-          id: d.video.id,
-          title: d.video.title,
-          script: d.video.script,
-          captions: d.video.captions,
-          video_storage_path: d.video.video_storage_path,
-          thumbnail_storage_path: d.video.thumbnail_storage_path,
-          duration_seconds: d.video.duration_seconds,
-          streamUrl,
-          thumbnailUrl,
-          slides,
-          topic: d.video.topic,
-        },
-      };
-    })
-  );
+  const initialDeliveries = await signDeliveries(supabase, deliveriesData);
 
   return (
     <main className="h-screen w-full bg-black overflow-hidden">

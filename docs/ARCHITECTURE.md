@@ -52,10 +52,17 @@ Picking the wrong one is the most common mistake in this codebase.
 
 | Module | Runs in | Key | Use for |
 | --- | --- | --- | --- |
-| `src/lib/supabase/server.ts` | server components, route handlers | anon + user session | rendering a page as the signed-in user |
-| `src/lib/supabase/client.ts` | client components | anon | runtime queries in the browser, e.g. feed pagination |
+| `src/lib/supabase/server.ts` | server components, route handlers, server actions | anon + user session | rendering and paginating as the signed-in user |
 | `src/lib/supabase/admin.ts` | server only | **service role** | webhook reconciliation, cron dispatch, the dev bypass |
 | `src/lib/supabase/service.ts` | server only | **service role** | the Inngest pipeline, and nothing else |
+
+**There is no browser client.** There was one — `src/lib/supabase/client.ts`,
+used by `feed-scroller.tsx` to page the feed — and it was deleted along
+with that query. The browser cannot sign a private-bucket URL and has no
+session at all under the dev bypass, so pagination became a server
+action. Nothing client-side talks to Supabase directly now; if you need
+that back (realtime, say), add it deliberately rather than reaching for
+`createBrowserClient` out of habit.
 
 `service.ts` and `admin.ts` are the same client written twice — both
 export a memoised `getSupabaseAdmin()` over `SUPABASE_SERVICE_ROLE_KEY`.
@@ -89,8 +96,10 @@ slide in the manifest.
 
 `FeedContainer` renders `FeedScroller`, which renders one
 `VideoPlayerItem` per delivery, calls `useFeedPrefetch` to warm upcoming
-lessons, and pages in more deliveries with the **browser** client as the
-user scrolls. `VideoPlayerItem` plays the narration over the slides (see
+lessons, and asks the `loadMoreDeliveries` **server action** for the next
+page as the user scrolls — see
+[Signing happens in one place](#signing-happens-in-one-place).
+`VideoPlayerItem` plays the narration over the slides (see
 [Playback](#playback)) and reports progress through
 `src/lib/telemetry/video-beacon.ts`. Completing a watch extends the
 streak and can raise `HabitCelebrationModal`.
@@ -164,6 +173,27 @@ matching the captions.
 
 If alignment fails, `proportionalAlignment()` distributes timings by word
 length. Degraded cues beat no lesson.
+
+## Signing happens in one place
+
+`src/lib/feed/deliveries.ts` owns turning a delivery row into something
+the player can render: `DELIVERY_SELECT` (the columns, including
+`ai_metadata`) and `signDeliveries()` (signed URLs for the narration,
+the poster and every slide). Both the home page and the
+`loadMoreDeliveries` server action call it.
+
+It is one module because it used to be two, and the copies drifted into
+a real defect: the first five lessons rendered and everything loaded by
+scrolling came back as a black player. The pagination copy used
+`getPublicUrl` on private buckets, named two buckets that do not exist
+(`videos`, `thumbnails`), and ran in the browser — where the dev bypass
+has no session for storage RLS to authorise. All three failures are
+silent, because `getPublicUrl` is a string builder that never contacts
+the server.
+
+The poster is slide 1, so it lives in `learning-videos` with the other
+slides even though the column is `thumbnail_storage_path` and a
+`learning-thumbnails` bucket exists. Nothing writes to that bucket.
 
 ## Playback
 

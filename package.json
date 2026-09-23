@@ -11,7 +11,8 @@
     "test": "vitest run --passWithNoTests",
     "typegen": "next typegen",
     "check:routes": "tsc -p tsconfig.json --noEmit",
-    "gate": "npm run typecheck && npm run test",
+    "pregate": "npm run typecheck",
+    "gate": "npm run test",
     "seed:dev": "node scripts/seed-dev-user.mjs",
     "seed:lesson": "node scripts/seed-dev-lesson.mjs"
   },

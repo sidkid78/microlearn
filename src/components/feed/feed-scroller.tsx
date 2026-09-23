@@ -5,13 +5,15 @@ import type { DeliveryWithVideo } from '@/lib/types/feed';
 import { VideoPlayerItem } from './video-player-item';
 import { useFeedPrefetch } from '@/lib/hooks/use-feed-prefetch';
 import { Volume2, VolumeX, Flame, Loader2 } from 'lucide-react';
-import { createClient } from '@/lib/supabase/client';
+import { loadMoreDeliveries as loadMoreDeliveriesAction } from '@/lib/actions/feed';
 
 interface FeedScrollerProps {
   deliveries: DeliveryWithVideo[];
   streak: { current_streak: number; longest_streak: number } | null;
   userId: string;
 }
+
+const PAGE_SIZE = 5;
 
 export function FeedScroller({ deliveries, streak, userId }: FeedScrollerProps) {
   const [feedDeliveries, setFeedDeliveries] = useState<DeliveryWithVideo[]>(deliveries);
@@ -59,7 +61,13 @@ export function FeedScroller({ deliveries, streak, userId }: FeedScrollerProps) 
     });
   }, [feedDeliveries.length]);
 
-  // Runtime pagination using the Supabase browser client
+  // Pagination is a server action, not a browser query.
+  //
+  // The client cannot build these URLs: both buckets are private, so
+  // the assets need signing, and signing needs a server. It also has no
+  // session at all under the dev bypass. Asking the server for a page
+  // of render-ready deliveries removes both problems and stops the
+  // bucket names being written down in two places.
   const loadMoreDeliveries = useCallback(async () => {
     if (isLoadingRef.current || !hasMore || feedDeliveries.length === 0) return;
 
@@ -68,106 +76,27 @@ export function FeedScroller({ deliveries, streak, userId }: FeedScrollerProps) 
 
     try {
       const lastDelivery = feedDeliveries[feedDeliveries.length - 1];
-      const supabase = createClient();
+      const result = await loadMoreDeliveriesAction({
+        before: lastDelivery.scheduled_for,
+        limit: PAGE_SIZE,
+      });
 
-      const { data: deliveriesData, error } = await supabase
-        .from('user_feed_deliveries')
-        .select(`
-          id,
-          scheduled_for,
-          status,
-          watched_at,
-          watch_duration_seconds,
-          is_completed,
-          video:generated_videos (
-            id,
-            title,
-            script,
-            captions,
-            ai_metadata,
-            video_storage_path,
-            thumbnail_storage_path,
-            duration_seconds,
-            topic:topics (
-              title,
-              category,
-              difficulty_level
-            )
-          )
-        `)
-        .eq('user_id', userId)
-        .lt('scheduled_for', lastDelivery.scheduled_for)
-        .order('scheduled_for', { ascending: false })
-        .limit(5);
-
-      if (error) {
-        console.error('Error fetching additional deliveries:', error);
-        return;
-      }
-
-      if (!deliveriesData || deliveriesData.length === 0) {
-        setHasMore(false);
+      if (!result.success || !result.data) {
+        console.error('Error fetching additional deliveries:', result.error);
         return;
       }
 
       const existingIds = new Set(feedDeliveries.map((d) => d.id));
-      const validItems = (deliveriesData as any[]).filter(
-        (d) => d && d.video && !existingIds.has(d.id)
-      );
+      const fresh = result.data.filter((d) => !existingIds.has(d.id));
 
-      if (validItems.length === 0) {
-        setHasMore(false);
-        return;
+      if (fresh.length > 0) {
+        setFeedDeliveries((prev) => [...prev, ...fresh]);
       }
 
-      const newDeliveries: DeliveryWithVideo[] = validItems.map((d: any) => {
-        const videoPath = d.video?.video_storage_path;
-        const thumbnailPath = d.video?.thumbnail_storage_path;
-
-        const {
-          data: { publicUrl: streamUrl },
-        } = supabase.storage.from('videos').getPublicUrl(videoPath || '');
-        const {
-          data: { publicUrl: thumbnailUrl },
-        } = supabase.storage.from('thumbnails').getPublicUrl(thumbnailPath || '');
-
-        return {
-          id: d.id,
-          scheduled_for: d.scheduled_for,
-          status: d.status,
-          watched_at: d.watched_at,
-          watch_duration_seconds: d.watch_duration_seconds,
-          is_completed: !!d.is_completed,
-          video: {
-            id: d.video.id,
-            title: d.video.title,
-            script: d.video.script,
-            captions: d.video.captions,
-            video_storage_path: d.video.video_storage_path,
-            thumbnail_storage_path: d.video.thumbnail_storage_path,
-            duration_seconds: d.video.duration_seconds,
-            streamUrl,
-            thumbnailUrl,
-            // Same shape the server component builds. Paginated pages
-            // must carry slides too, or scrolling past the first batch
-            // silently drops the visuals.
-            slides: (((d.video as { ai_metadata?: { slides?: Array<{
-              sequence: number; startSecond: number; endSecond: number;
-              storagePath: string; onScreenHook: string;
-            }> } }).ai_metadata?.slides) ?? []).map((slide) => ({
-              sequence: slide.sequence,
-              startSecond: slide.startSecond,
-              endSecond: slide.endSecond,
-              url: supabase.storage.from('videos').getPublicUrl(slide.storagePath).data.publicUrl,
-              onScreenHook: slide.onScreenHook,
-            })),
-            topic: d.video.topic,
-          },
-        };
-      });
-
-      setFeedDeliveries((prev) => [...prev, ...newDeliveries]);
-      if (deliveriesData.length < 5) {
+      // Short page means the end. Measured against what the server
+      // returned, not what survived de-duplication, or a page made
+      // entirely of already-seen rows would look like the end of the feed.
+      if (result.data.length < PAGE_SIZE) {
         setHasMore(false);
       }
     } catch (err) {
@@ -176,7 +105,7 @@ export function FeedScroller({ deliveries, streak, userId }: FeedScrollerProps) 
       isLoadingRef.current = false;
       setIsLoadingMore(false);
     }
-  }, [hasMore, feedDeliveries, userId]);
+  }, [hasMore, feedDeliveries]);
 
   // Trigger pagination when user scrolls near the end of the loaded feed
   useEffect(() => {
